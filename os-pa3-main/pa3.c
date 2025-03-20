@@ -62,121 +62,133 @@ extern unsigned int mapcounts[];
  */
 bool lookup_tlb(unsigned int vpn, unsigned int rw, unsigned int *pfn)
 {
-	for (int i = 0; i < NR_PAGEFRAMES; i++)
-	{
-		if (tlb[i].vpn == vpn && tlb[i].rw == rw && tlb[i].valid == true)
-		{
-			*pfn = tlb[i].pfn;
-			return true;
-		}
-	}
-	return false;
+    for (int i = 0; i < NR_PAGEFRAMES; i++)
+    {
+        if (tlb[i].valid && tlb[i].vpn == vpn && tlb[i].rw == rw)
+        {
+            *pfn = tlb[i].pfn;
+            return true;
+        }
+    }
+    return false;
 }
 
-/**
- * insert_tlb(@vpn, @rw, @pfn)
- *
- * DESCRIPTION
- *   Insert the mapping from @vpn to @pfn for @rw into the TLB. The framework will
- *   call this function when required, so no need to call this function manually.
- *   Note that if there exists an entry for @vpn already, just update it accordingly
- *   rather than removing it or creating a new entry.
- *   Also, in the current simulator, TLB is big enough to cache all the entries of
- *   the current page table, so don't worry about TLB entry eviction. ;-)
- */
 void insert_tlb(unsigned int vpn, unsigned int rw, unsigned int pfn)
 {
-	for (int i = 0; i < NR_PAGEFRAMES; i++)
-	{
-		if (tlb[i].valid == true && tlb[i].vpn == vpn)
-		{
-			tlb[i].pfn = pfn;
-			tlb[i].rw = rw;
-		}
-		else if (tlb[i].valid == false)
-		{
-			tlb[i].valid = true;
-			tlb[i].pfn = pfn;
-			tlb[i].vpn = vpn;
-			tlb[i].rw = rw;
-		}
-	}
-	return;
+    for (int i = 0; i < NR_PAGEFRAMES; i++)
+    {
+        if (tlb[i].valid && tlb[i].vpn == vpn)
+        {
+            tlb[i].pfn = pfn;
+            tlb[i].rw = rw;
+            return;
+        }
+    }
+
+    for (int i = 0; i < NR_PAGEFRAMES; i++)
+    {
+        if (!tlb[i].valid)
+        {
+            tlb[i].valid = true;
+            tlb[i].vpn = vpn;
+            tlb[i].rw = rw;
+            tlb[i].pfn = pfn;
+            return;
+        }
+    }
 }
 
-/**
- * alloc_page(@vpn, @rw)
- *
- * DESCRIPTION
- *   Allocate a page frame that is not allocated to any process, and map it
- *   to @vpn. When the system has multiple free pages, this function should
- *   allocate the page frame with the **smallest pfn**.
- *   You may construct the page table of the @current process. When the page
- *   is allocated with ACCESS_WRITE flag, the page may be later accessed for writes.
- *   However, the pages populated with ACCESS_READ should not be accessible with
- *   ACCESS_WRITE accesses.
- *
- * RETURN
- *   Return allocated page frame number.
- *   Return -1 if all page frames are allocated.
- */
 unsigned int alloc_page(unsigned int vpn, unsigned int rw)
 {
-	return -1;
+    for (unsigned int i = 0; i < NR_PAGEFRAMES; i++)
+    {
+        if (mapcounts[i] == 0)
+        {
+            mapcounts[i] = 1;
+
+            struct pagetable_entry *pte = &current->pagetable.entries[vpn];
+            pte->valid = true;
+            pte->pfn = i;
+            pte->rw = rw;
+
+            insert_tlb(vpn, rw, i);
+
+            return i;
+        }
+    }
+    return -1;
 }
 
-/**
- * free_page(@vpn)
- *
- * DESCRIPTION
- *   Deallocate the page from the current processor. Make sure that the fields
- *   for the corresponding PTE (valid, rw, pfn) is set @false or 0.
- *   Also, consider the case when a page is shared by two processes,
- *   and one process is about to free the page. Also, think about TLB as well ;-)
- */
 void free_page(unsigned int vpn)
 {
+    struct pagetable_entry *pte = &current->pagetable.entries[vpn];
+    if (!pte->valid)
+        return;
+
+    unsigned int pfn = pte->pfn;
+    if (--mapcounts[pfn] == 0)
+    {
+        pte->valid = false;
+        pte->pfn = 0;
+        pte->rw = 0;
+    }
+
+    for (int i = 0; i < NR_PAGEFRAMES; i++)
+    {
+        if (tlb[i].valid && tlb[i].vpn == vpn)
+        {
+            tlb[i].valid = false;
+        }
+    }
 }
 
-/**
- * handle_page_fault()
- *
- * DESCRIPTION
- *   Handle the page fault for accessing @vpn for @rw. This function is called
- *   by the framework when the __translate() for @vpn fails. This implies;
- *   0. page directory is invalid
- *   1. pte is invalid
- *   2. pte is not writable but @rw is for write
- *   This function should identify the situation, and do the copy-on-write if
- *   necessary.
- *
- * RETURN
- *   @true on successful fault handling
- *   @false otherwise
- */
 bool handle_page_fault(unsigned int vpn, unsigned int rw)
 {
-	return false;
+    struct pagetable_entry *pte = &current->pagetable.entries[vpn];
+
+    if (!pte->valid)
+    {
+        return alloc_page(vpn, rw) != -1;
+    }
+    else if (rw == ACCESS_WRITE && !pte->rw)
+    {
+        unsigned int pfn = alloc_page(vpn, ACCESS_WRITE);
+        if (pfn == -1)
+            return false;
+
+        pte->rw = ACCESS_WRITE;
+        return true;
+    }
+
+    return false;
 }
 
-/**
- * switch_process()
- *
- * DESCRIPTION
- *   If there is a process with @pid in @processes, switch to the process.
- *   The @current process at the moment should be put into the @processes
- *   list, and @current should be replaced to the requested process.
- *   Make sure that the next process is unlinked from the @processes, and
- *   @ptbr is set properly.
- *
- *   If there is no process with @pid in the @processes list, fork a process
- *   from the @current. This implies the forked child process should have
- *   the identical page table entry 'values' to its parent's (i.e., @current)
- *   page table.
- *   To implement the copy-on-write feature, you should manipulate the writable
- *   bit in PTE and mapcounts for shared pages. You may use pte->private for
- *   storing some useful information :-)
- */
 void switch_process(unsigned int pid)
 {
+    struct process *next = NULL;
+    struct process *temp;
+
+    list_for_each_entry(temp, &processes, list)
+    {
+        if (temp->pid == pid)
+        {
+            next = temp;
+            break;
+        }
+    }
+
+    if (!next)
+    {
+        next = malloc(sizeof(struct process));
+        next->pid = pid;
+        memcpy(&next->pagetable, &current->pagetable, sizeof(struct pagetable));
+
+        list_add_tail(&next->list, &processes);
+    }
+
+    list_del(&next->list);
+    list_add_tail(&current->list, &processes);
+
+    current = next;
+    ptbr = &current->pagetable;
 }
