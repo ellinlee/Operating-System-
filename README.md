@@ -5,6 +5,7 @@ The assignments cover various OS concepts, including process management, memory 
 
 ## Contents
 - Shell Implentation
+- Processor Schedulers Simulator
 - Virtual Memory Simulator
 
 ## How to Run
